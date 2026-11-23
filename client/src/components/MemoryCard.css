@@ -1,0 +1,16 @@
+.mcard {
+  background: var(--surface); border-radius: var(--radius); overflow: hidden;
+  box-shadow: var(--shadow); border: 1px solid rgba(235, 230, 221, 0.7);
+}
+.mcard-media { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: var(--beige); }
+.mcard-body { padding: 18px 20px 16px; display: grid; gap: 8px; }
+.mcard h3 { font-size: 1.25em; line-height: 1.2; }
+.mcard-caption { color: var(--muted); font-size: 0.95em; }
+.mcard-own { font-family: var(--serif); font-style: italic; color: var(--ink); font-size: 0.95em; }
+.mcard-quote { font-family: var(--serif); font-size: 1.15em; line-height: 1.45; }
+.mcard footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 0.8em; color: var(--muted); margin-top: 4px; }
+.mcard.text-only { background: linear-gradient(160deg, var(--lavender) 0%, #f6f1fb 55%, var(--blue) 140%); }
+.mcard.text-only .mcard-body { padding: 26px 24px 20px; }
+.mcard.large .mcard-media { aspect-ratio: 16 / 10; max-height: 56vh; }
+.mcard.large h3 { font-size: 2em; }
+.mcard.large .mcard-caption, .mcard.large .mcard-quote { font-size: 1.25em; }
