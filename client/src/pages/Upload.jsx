@@ -3,9 +3,8 @@ import { useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
 import './Upload.css';
 
-const CATEGORIES = ['Celebration', 'Milestone', 'Friendship', 'Family', 'Achievement', 'Everyday'];
 const MAX_TEXT = 600;
-const MAX_VIDEO_MB = 80;
+const MAX_VIDEO_MB = 500;
 
 /** Downscale big phone photos so uploads are fast and vision analysis stays within limits. */
 async function shrinkImage(file, maxSide = 1600) {
@@ -87,7 +86,6 @@ export default function Upload() {
   const [video, setVideo] = useState(null);
   const [text, setText] = useState('');
   const [name, setName] = useState('');
-  const [category, setCategory] = useState('');
   const [open, setOpen] = useState({ photo: false, video: false, text: false });
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(null);
@@ -106,8 +104,20 @@ export default function Upload() {
       const form = new FormData();
       form.set('event', slug);
       // File.lastModified is the capture time for camera files; the server uses it only when it is plausible.
+      // Best evidence first: the camera's own capture time (EXIF). Otherwise the file date, but only if it is not
+      // simply "just now" (forwarded or saved files carry the time they were received).
+      let taken = null, src = '';
+      if (photo) {
+        try {
+          const { parse } = await import('exifr/dist/lite.esm.mjs');
+          const exif = await parse(photo, ['DateTimeOriginal', 'CreateDate']);
+          const d = exif?.DateTimeOriginal || exif?.CreateDate;
+          if (d instanceof Date && !Number.isNaN(d.getTime())) { taken = d; src = 'exif'; }
+        } catch { /* no EXIF, e.g. screenshots or WhatsApp images */ }
+      }
       const media = photo || video;
-      if (media?.lastModified) form.set('takenAt', new Date(media.lastModified).toISOString());
+      if (!taken && media?.lastModified && Date.now() - media.lastModified > 10 * 60_000) { taken = new Date(media.lastModified); src = 'file'; }
+      if (taken) { form.set('takenAt', taken.toISOString()); form.set('takenSrc', src); }
       if (photo) form.set('photo', await shrinkImage(photo));
       if (video) {
         form.set('video', video);
@@ -116,7 +126,6 @@ export default function Upload() {
       }
       if (text.trim()) form.set('text', text.trim());
       if (name.trim()) form.set('name', name.trim());
-      if (category) form.set('category', category);
       const res = await api.submit(form);
       setDone(res);
     } catch (err) {
@@ -127,7 +136,7 @@ export default function Upload() {
   }
 
   function reset() {
-    setPhoto(null); setVideo(null); setText(''); setCategory(''); setOpen({ photo: false, video: false, text: false }); setDone(null); setError('');
+    setPhoto(null); setVideo(null); setText(''); setOpen({ photo: false, video: false, text: false }); setDone(null); setError('');
   }
 
   function chooseVideo(f) {
@@ -190,15 +199,6 @@ export default function Upload() {
           <span>Your name (optional)</span>
           <input className="input" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder="Shown on your memory card" autoComplete="given-name" />
         </label>
-
-        <div className="field">
-          <span>Category (optional)</span>
-          <div className="cats">
-            {CATEGORIES.map((c) => (
-              <button key={c} type="button" className={`cat ${category === c ? 'on' : ''}`} onClick={() => setCategory(category === c ? '' : c)}>{c}</button>
-            ))}
-          </div>
-        </div>
 
         {error && <p className="err" role="alert">{error}</p>}
         <button className="btn primary submit" disabled={busy || !hasContent}>

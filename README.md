@@ -19,7 +19,7 @@ server/   Express + Socket.IO + pg   → Render / Railway / AWS
 2. Backend:
    ```
    cd server
-   cp .env.example .env     # set DATABASE_URL, ADMIN_PASSWORD, AUTH_SECRET, ANTHROPIC_API_KEY
+   cp .env.example .env     # set DATABASE_URL, ADMIN_PASSWORD, AUTH_SECRET, GEMINI_API_KEY
    npm install
    npm run dev              # tables + a "default" event are created on first start
    ```
@@ -34,7 +34,7 @@ server/   Express + Socket.IO + pg   → Render / Railway / AWS
 ## How it works
 
 - **Submit**: any mix of photo, video, text. Photos are downscaled in the browser, then stored (local disk or S3). Memories start as *pending* unless *Auto-approve* is on.
-- **AI**: for each memory the server asks Claude (vision + text) for a title, caption, short story, timeline line, theme, tags and story chapter. Without `ANTHROPIC_API_KEY` a keyword-based fallback keeps everything working. Videos are categorised from their text and category only; frames are not analysed yet.
+- **AI**: for each memory the server asks Gemini (vision + text) for a title, caption, short story, timeline line, theme, tags and story chapter. Without `GEMINI_API_KEY` a keyword-based fallback keeps everything working. Videos are categorised from their text and category only; frames are not analysed yet.
 - **Realtime**: approving a memory emits `memory:upsert` over Socket.IO and it appears on the wall with a spotlight. Reject/delete emits `memory:remove`. Settings and stories also push live.
 - **Final story**: *Generate event story* groups approved memories (featured first) into Beginning / Special Moments / Achievements / Future Memories. The wall's Story mode plays it as an auto-advancing slideshow.
 - **Toggles**: photos, videos and AI stories can be switched per event; the wall reacts instantly.

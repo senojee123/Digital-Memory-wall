@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, connectSocket, mediaUrl, timeLabel } from '../api.js';
-import MemoryCard from '../components/MemoryCard.jsx';
+import MemoryCard, { Clip } from '../components/MemoryCard.jsx';
 import './Wall.css';
 
 const SPOTLIGHT_MS = 9000;
-const SLIDE_MS = 10000;
+const SLIDE_MS = 5000;
 
 /* Apply the organiser's photo/video switches to what the screen shows. */
 function applySettings(list, s) {
@@ -31,11 +31,17 @@ function look(id) {
   };
 }
 
-function PinCard({ m, showAi, w }) {
+function hash(id) {
+  let h = 7;
+  for (let i = 0; i < id.length; i++) h = (h * 33 + id.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+function PinCard({ m, showAi, w, x, y }) {
   const media = m.photoUrl || m.videoUrl;
   const by = `${m.authorName || 'A guest'} · ${timeLabel(m.createdAt)}`;
   return (
-    <article className={`pin ${media ? 'polaroid' : 'note'}`} style={{ ...look(m.id), '--w': `${w}px` }}>
+    <article className={`pin ${media ? 'polaroid' : 'note'}`} style={{ ...look(m.id), '--w': `${w}px`, '--x': `${x}px`, '--y': `${y}px` }}>
       {m.photoUrl && <img src={mediaUrl(m.photoUrl)} alt={m.title || 'Shared memory'} loading="lazy" />}
       {!m.photoUrl && m.videoUrl && (
         <div className="pin-video">
@@ -102,7 +108,7 @@ export function pickVisible(memories, cap, offset) {
   return [...memories.filter((m) => pinned.has(m.id)), ...rotating].sort(chrono);
 }
 
-function Gallery({ memories, showAi, eventName }) {
+function Gallery({ memories, showAi, eventName, tagline }) {
   const area = useRef();
   const { w: W, h: H } = useSize(area);
   const [offset, setOffset] = useState(0);
@@ -124,15 +130,44 @@ function Gallery({ memories, showAi, eventName }) {
 
   const shown = useMemo(() => (rotating ? pickVisible(memories, plan.cap, offset) : memories), [memories, rotating, plan.cap, offset]);
 
+  // Spread the cards over the whole board (like pins on a corkboard): the grid that gives the biggest cards wins,
+  // and each card sits at a stable random offset inside its cell.
+  const { spots, spotW } = useMemo(() => {
+    const n = shown.length;
+    if (!n || !W || !H) return { spots: [], spotW: Math.floor(plan.w) };
+    let best = null;
+    for (let cols = 1; cols <= n; cols++) {
+      const rows = Math.ceil(n / cols);
+      const w = Math.min(maxW, (W / cols) * 0.94, ((H / rows) * 0.94) / CELL);
+      if (!best || w > best.w) best = { cols, rows, w };
+    }
+    const w = Math.floor(best.w);
+    const cw = W / best.cols, ch = H / best.rows;
+    const order = [...shown].sort((a, b) => hash(a.id) - hash(b.id)); // shuffled so neighbours are not always in time order
+    return {
+      spotW: w,
+      spots: order.map((m, i) => {
+        const h = hash(m.id);
+        const slackX = Math.max(0, cw - w), slackY = Math.max(0, ch - w * CELL);
+        const col = i % best.cols, row = Math.floor(i / best.cols);
+        return {
+          m,
+          x: Math.round(col * cw + slackX * (0.15 + 0.7 * ((h % 97) / 97))),
+          y: Math.round(row * ch + slackY * (0.15 + 0.7 * (((h >> 7) % 89) / 89))),
+        };
+      }),
+    };
+  }, [shown, W, H, maxW, plan.w]);
+
   return (
     <div className="board">
       <div className="plaque">
         <h1>{eventName}</h1>
-        <span>Share · Explore · Relive</span>
+        {tagline && <span>{tagline}</span>}
       </div>
       {/* The measured area is always mounted, so it is ready as soon as the first memory arrives. */}
       <div className="pins" ref={area}>
-        {shown.map((m) => <PinCard key={m.id} m={m} showAi={showAi} w={Math.floor(plan.w)} />)}
+        {spots.map(({ m, x, y }) => <PinCard key={m.id} m={m} showAi={showAi} w={spotW} x={x} y={y} />)}
       </div>
       {!memories.length && (
         <div className="wall-empty">
@@ -145,61 +180,70 @@ function Gallery({ memories, showAi, eventName }) {
 }
 
 /* ---------------- AI Story mode ---------------- */
-function StoryMode({ story, memories }) {
+/* One memory filling the whole screen; its words sit on the picture. */
+function FullSlide({ m, onVideoEnd, showAi, eventName }) {
+  const title = showAi ? m.title : null;
+  const words = showAi ? m.caption || m.text : m.text;
+  const by = `${m.authorName || 'A guest'} · ${timeLabel(m.createdAt)}`;
+  if (m.videoUrl) {
+    return (
+      <div className="full">
+        <Clip src={mediaUrl(m.videoUrl)} onEnded={onVideoEnd} className="full-media" />
+        <div className="full-top"><h1>{eventName}</h1></div><i className="full-live" title="Live" /><div className="full-cap">{title && <h2>{title}</h2>}{m.text && <p>{m.text}</p>}<small>{by}</small></div>
+      </div>
+    );
+  }
+  if (m.photoUrl) {
+    return (
+      <div className="full">
+        <img className="full-media" src={mediaUrl(m.photoUrl)} alt={title || 'Shared memory'} />
+        <div className="full-top"><h1>{eventName}</h1></div><i className="full-live" title="Live" /><div className="full-cap">{title && <h2>{title}</h2>}{words && <p>{words}</p>}<small>{by}</small></div>
+      </div>
+    );
+  }
+  return (
+    <div className="full full-text">
+      <div className="full-top"><h1>{eventName}</h1></div><i className="full-live" title="Live" />
+      <blockquote>“{m.text}”</blockquote>
+      <small>{by}</small>
+    </div>
+  );
+}
+
+function StoryMode({ story, memories, showAi, eventName }) {
   const byId = useMemo(() => new Map(memories.map((m) => [m.id, m])), [memories]);
   const slides = useMemo(() => {
-    const out = [{ type: 'cover' }];
-    story.sections.forEach((s, si) => {
-      const items = s.memoryIds.map((id) => byId.get(id)).filter(Boolean);
-      if (!items.length) return;
-      out.push({ type: 'section', section: s, si });
-      items.forEach((m) => out.push({ type: 'memory', memory: m, section: s, si }));
+    // Only the memories themselves, in the order the AI arranged them (beginning to end).
+    const out = [];
+    story.sections.forEach((s) => s.memoryIds.forEach((id) => byId.has(id) && out.push({ type: 'memory', memory: byId.get(id) })));
+    // The story rebuilds a little after each upload; until then, slot any newer memory in by time so nothing is skipped.
+    const inStory = new Set(out.map((s) => s.memory.id));
+    memories.filter((m) => !inStory.has(m.id)).forEach((m) => {
+      const at = out.findIndex((s) => new Date(s.memory.createdAt) > new Date(m.createdAt));
+      out.splice(at < 0 ? out.length : at, 0, { type: 'memory', memory: m });
     });
     return out;
-  }, [story, byId]);
+  }, [story, byId, memories]);
 
   const [i, setI] = useState(0);
+  const [tick, setTick] = useState(0); // remounts the slide, so a lone video replays
   useEffect(() => setI(0), [story.id]);
-  useEffect(() => {
-    const t = setTimeout(() => setI((n) => (n + 1) % slides.length), SLIDE_MS);
-    return () => clearTimeout(t);
-  }, [i, slides.length]);
-
+  const next = useCallback(() => { setI((n) => (n + 1) % Math.max(1, slides.length)); setTick((t) => t + 1); }, [slides.length]);
   const slide = slides[Math.min(i, slides.length - 1)];
-  const sections = story.sections.filter((s) => s.memoryIds.some((id) => byId.has(id)));
+  const isClip = Boolean(slide?.memory.videoUrl);
+  // A video plays to its end (with a safety cap); photos and text use the normal timer.
+  useEffect(() => {
+    if (!slide) return;
+    const t = setTimeout(next, isClip ? 60000 : SLIDE_MS);
+    return () => clearTimeout(t);
+  }, [i, tick, isClip, next, slide]);
 
+  if (!slide) return null;
   return (
     <div className="story">
-      <div className="story-stage" key={i}>
-        {slide.type === 'cover' && (
-          <div className="story-cover">
-            <span className="chip">Our story</span>
-            <h1>{story.title}</h1>
-            <p>{story.subtitle}</p>
-          </div>
-        )}
-        {slide.type === 'section' && (
-          <div className="story-cover">
-            <span className="chip blue">Chapter {slide.si + 1}</span>
-            <h1>{slide.section.heading}</h1>
-            <p>{slide.section.description}</p>
-          </div>
-        )}
-        {slide.type === 'memory' && (
-          <div className="story-memory">
-            <MemoryCard memory={slide.memory} large />
-            <aside>
-              <span className="chip">{slide.section.heading}</span>
-              <p>{slide.memory.story || slide.memory.caption}</p>
-            </aside>
-          </div>
-        )}
+      <div className="story-stage" key={`${slide.memory.id}-${tick}`}>
+        <FullSlide m={slide.memory} onVideoEnd={next} showAi={showAi} eventName={eventName} />
       </div>
-      <nav className="story-progress" aria-label="Story chapters">
-        {sections.map((s) => (
-          <span key={s.key} className={slide.section?.key === s.key ? 'on' : ''}>{s.heading}</span>
-        ))}
-      </nav>
     </div>
   );
 }
@@ -217,8 +261,10 @@ export default function Wall() {
 
   const settings = event?.settings || {};
   const memories = useMemo(() => applySettings(raw, settings), [raw, settings]);
+  const title = settings.wallTitle || event?.name || 'Memory Wall';
+  const tagline = settings.tagline ?? 'Share · Explore · Relive';
   const aiOn = settings.aiStories !== false;
-  const storyAvailable = aiOn && story && story.sections?.length;
+  const storyAvailable = aiOn && story && story.sections?.length && memories.length > 0;
   // The organiser picks the view in the admin dashboard; the display just follows (and falls back to the gallery
   // if the story is not ready yet).
   const effectiveMode = settings.displayMode === 'story' && storyAvailable ? 'story' : 'gallery';
@@ -246,6 +292,7 @@ export default function Wall() {
       socket.on('memory:remove', ({ id }) => { knownIds.current.delete(id); setRaw((l) => l.filter((m) => m.id !== id)); });
       socket.on('settings:update', (s) => setEvent((e) => e && { ...e, settings: s }));
       socket.on('story:update', setStory);
+      socket.on('event:update', setEvent);
       // Resync after a dropped connection so nothing is missed.
       socket.io.on('reconnect', () => api.memories(slug).then((l) => { setRaw(l); l.forEach((m) => knownIds.current.add(m.id)); }));
     })().catch(console.error);
@@ -269,7 +316,7 @@ export default function Wall() {
   return (
     <div className="wall" onDoubleClick={toggleFullscreen}>
       <main className="wall-main">
-        {effectiveMode === 'story' ? <StoryMode story={story} memories={memories} /> : <Gallery memories={memories} showAi={aiOn} eventName={event?.name || 'Memory Wall'} />}
+        {effectiveMode === 'story' ? <StoryMode story={story} memories={memories} showAi={aiOn} eventName={title} /> : <Gallery memories={memories} showAi={aiOn} eventName={title} tagline={tagline} />}
       </main>
 
       {spot && (

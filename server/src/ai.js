@@ -1,13 +1,12 @@
-import Anthropic from '@anthropic-ai/sdk';
-
-const MODEL = process.env.AI_MODEL || 'claude-sonnet-5-5';
-let client;
-const getClient = () => {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  return (client ||= new Anthropic());
-};
+// Google Gemini over its REST API (no extra dependency). Set GEMINI_API_KEY; pick the model with GEMINI_MODEL.
+const MODEL = () => process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+let onUsage = () => {};
+export const setUsageLogger = (fn) => { onUsage = fn; };
+const getClient = () => Boolean(process.env.GEMINI_API_KEY);
 
 export const THEMES = ['celebration', 'achievement', 'family', 'friendship', 'travel', 'nature', 'milestone', 'everyday', 'love', 'gratitude'];
+const PHASES = ['arrival', 'opening', 'activity', 'meal', 'speeches', 'performance', 'celebration', 'closing', 'unknown'];
+const DAYPARTS = ['morning', 'afternoon', 'evening', 'night', 'unknown'];
 export const SECTIONS = {
   beginning: { heading: 'Beginning', blurb: 'Where it all started.' },
   special: { heading: 'Special Moments', blurb: 'The moments that made it ours.' },
@@ -24,14 +23,40 @@ function extractJson(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function ask(content, system, maxTokens = 1200) {
-  const res = await getClient().messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: 'user', content }],
+// USD per 1M tokens (Gemini 3.8 Flash paid tier). Prices double on 2027-01-01; override with GEMINI_PRICE_IN / GEMINI_PRICE_OUT.
+function prices() {
+  const late = Date.now() >= Date.UTC(2027, 0, 1);
+  return {
+    in: Number(process.env.GEMINI_PRICE_IN) || (late ? 1.5 : 0.75),
+    out: Number(process.env.GEMINI_PRICE_OUT) || (late ? 7.5 : 3.75),
+  };
+}
+let runningTotal = 0;
+
+async function ask(content, system, maxTokens = 1200, label = 'ai') {
+  const parts = content.map((b) => (b.type === 'image' ? { inlineData: { mimeType: b.source.media_type, data: b.source.data } } : { text: b.text }));
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL()}:generateContent`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts }],
+      generationConfig: { maxOutputTokens: Math.max(maxTokens, 2048), responseMimeType: 'application/json', temperature: 0.7 },
+    }),
   });
-  return extractJson(res.content.filter((b) => b.type === 'text').map((b) => b.text).join(''));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${data.error?.message || 'request failed'}`);
+  const u = data.usageMetadata || {};
+  const input = u.promptTokenCount || 0;
+  const output = (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0);
+  onUsage({ model: MODEL(), input, output });
+  const p = prices();
+  const cost = (input * p.in + output * p.out) / 1e6;
+  runningTotal += cost;
+  console.log(`[AI cost] ${label.padEnd(6)} in ${String(input).padStart(6)}  out ${String(output).padStart(5)}  $${cost.toFixed(4)}   (session total $${runningTotal.toFixed(4)})`);
+  const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+  return extractJson(text);
 }
 
 const clean = (s, max) => (typeof s === 'string' ? s.trim().slice(0, max) : '');
@@ -48,6 +73,8 @@ Given a visitor's memory (photo analysis, and/or text), respond with ONLY a JSON
  "theme": one of ${JSON.stringify(THEMES)},
  "section": one of ["beginning","special","achievement","future"],
  "tags": up to 4 lowercase single-word tags describing visible subjects/themes,
+ "phase": one of ["arrival","opening","activity","meal","speeches","performance","celebration","closing","unknown"], the stage of the event this moment belongs to, judged from what is visible or written,
+ "daypart": one of ["morning","afternoon","evening","night","unknown"], from daylight, sky, lighting or a clock/text in the picture; "unknown" if indoors or unclear,
  "importance": integer 1-10, how much this memory deserves a place in a highlight film (emotion, clarity, uniqueness; 5 is typical),
  "moderation": { "verdict": "approve" | "review" | "reject", "reason": "short reason, max 15 words" }
 }
@@ -69,7 +96,7 @@ export async function analyzeMemory({ text, photo, frame, hasVideo, eventName, c
       type: 'text',
       text: `Event: ${eventName}\nCategory: ${category || 'none'}\nHas video: ${hasVideo ? 'yes' : 'no'}\nVisitor text: ${text ? `"""${text}"""` : '(none)'}`,
     });
-    const r = await ask(content, MEMORY_SYSTEM);
+    const r = await ask(content, MEMORY_SYSTEM, 1200, 'memory');
     return {
       title: clean(r.title, 60) || 'A Shared Moment',
       caption: clean(r.caption, 160),
@@ -79,6 +106,8 @@ export async function analyzeMemory({ text, photo, frame, hasVideo, eventName, c
       section: SECTIONS[r.section] ? r.section : 'special',
       tags: Array.isArray(r.tags) ? r.tags.slice(0, 4).map((t) => clean(String(t), 20).toLowerCase()).filter(Boolean) : [],
       verdict: mediaUnseen && r.moderation?.verdict === 'approve' ? 'review' : ['approve', 'review', 'reject'].includes(r.moderation?.verdict) ? r.moderation.verdict : 'review',
+      phase: PHASES.includes(r.phase) ? r.phase : 'unknown',
+      daypart: DAYPARTS.includes(r.daypart) ? r.daypart : 'unknown',
       score: Number.isFinite(+r.importance) ? Math.min(10, Math.max(1, Math.round(+r.importance))) : 5,
       note: mediaUnseen ? 'Media could not be inspected' : clean(r.moderation?.reason, 120),
     };
@@ -147,7 +176,7 @@ export function eventTime(m, eventCreatedAt) {
   const created = new Date(m.created_at).getTime();
   if (m.taken_at) {
     const t = new Date(m.taken_at).getTime();
-    if (Number.isFinite(t) && t >= new Date(eventCreatedAt).getTime() - 12 * 3600_000 && t <= created + 5 * 60_000) return t;
+    if (Number.isFinite(t) && t >= new Date(eventCreatedAt).getTime() - 24 * 3600_000 && t <= created + 5 * 60_000) return t;
   }
   return created;
 }
@@ -155,7 +184,11 @@ export function eventTime(m, eventCreatedAt) {
 const PLAN_SYSTEM = `You are the editor of an event's story, built from memories that attendees shared.
 Memories arrive in the order they were UPLOADED, which is not always the order things HAPPENED: people often share late.
 Put them in the order the event actually unfolded, from the first arrivals and opening to the closing and goodbyes.
-Evidence, strongest first: (1) a reliable "taken" time, (2) what the memory itself says or shows (opening, speeches, meals, performances, awards, closing, "see you next year"), (3) upload time.
+Evidence, strongest first:
+(1) "taken (camera)": the time the photo was really taken (from the camera). Trust it.
+(2) What the memory itself says or shows: its stage ("phase": arrival, opening, activity, meal, speeches, performance, celebration, closing) and the light ("light": morning, afternoon, evening, night). A daylight photo belongs before a night photo even if it was uploaded later; an "arrival" belongs near the start and a "closing" near the end.
+(3) "taken (file)": the file's date, which can be wrong (forwarded or edited files), so it must not override clear evidence from (1) and (2).
+(4) Upload time: the weakest evidence, since people share late.
 Group the ordered memories into 2-5 consecutive chapters.
 Respond with ONLY JSON:
 {
@@ -177,10 +210,11 @@ async function planWithAi({ eventName, eventCreatedAt, byTime }) {
   const lines = candidates.map((m, i) => {
     const up = new Date(m.created_at).getTime();
     const t = eventTime(m, eventCreatedAt);
-    const taken = t !== up ? ` | taken ${clockFmt(t)}` : '';
-    return `${i + 1} | uploaded ${clockFmt(up)}${taken} | ${m.ai_title || ''} | ${String(m.ai_caption || m.text || '').slice(0, 110)}`;
+    const taken = t !== up ? ` | taken (${m.taken_src === 'exif' ? 'camera' : 'file'}) ${clockFmt(t)}` : '';
+    const cues = [m.ai_phase && m.ai_phase !== 'unknown' ? `phase ${m.ai_phase}` : '', m.ai_daypart && m.ai_daypart !== 'unknown' ? `light ${m.ai_daypart}` : ''].filter(Boolean).join(', ');
+    return `${i + 1} | uploaded ${clockFmt(up)}${taken}${cues ? ` | ${cues}` : ''} | ${m.ai_title || ''} | ${String(m.ai_caption || m.text || '').slice(0, 110)}`;
   });
-  const plan = await ask([{ type: 'text', text: `Event: ${eventName}\n\nMemories:\n${lines.join('\n')}` }], PLAN_SYSTEM, 4000);
+  const plan = await ask([{ type: 'text', text: `Event: ${eventName}\n\nMemories:\n${lines.join('\n')}` }], PLAN_SYSTEM, 4000, 'story');
   return { plan, candidates };
 }
 

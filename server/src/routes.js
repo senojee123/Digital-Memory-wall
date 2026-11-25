@@ -4,14 +4,14 @@ import rateLimit from 'express-rate-limit';
 import { query, one, serializeMemory, serializeEvent } from './db.js';
 import { issueToken, passwordMatches, requireAdmin } from './auth.js';
 import { saveFile, removeFile } from './storage.js';
-import { analyzeMemory, generateEventStory, SECTIONS } from './ai.js';
+import { analyzeMemory, generateEventStory, setUsageLogger, SECTIONS } from './ai.js';
 import { renderFilm } from './film.js';
 import fs from 'node:fs/promises';
 
 const MAX_TEXT = 600;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 80 * 1024 * 1024, files: 2, fields: 10 },
+  limits: { fileSize: 500 * 1024 * 1024, files: 3, fields: 10 },
 });
 
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -20,13 +20,23 @@ const str = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, m
 export function createRouter(io) {
   const r = Router();
 
+  // Every AI call records its token use so the organiser can see what it costs.
+  setUsageLogger(({ model, input, output }) => {
+    query('INSERT INTO ai_usage (model, input_tokens, output_tokens) VALUES ($1,$2,$3)', [model, input, output]).catch(() => {});
+  });
+
   /* ---------- realtime helpers ---------- */
   // Rebuilds the event story from all approved memories, oldest → newest, and pushes it to the wall.
   async function rebuildStory(eventId) {
     const e = await one('SELECT * FROM events WHERE id=$1', [eventId]);
     if (!e) return null;
     const memories = await query(`SELECT * FROM memories WHERE event_id=$1 AND status='approved' ORDER BY created_at ASC`, [eventId]);
-    if (!memories.length) return null;
+    if (!memories.length) {
+      // Nothing left to tell: drop the old story so it can't linger on the wall.
+      await query('DELETE FROM stories WHERE event_id=$1', [eventId]);
+      io.to(`event:${eventId}`).emit('story:update', null);
+      return null;
+    }
     const story = await generateEventStory({ eventName: e.name, eventCreatedAt: e.created_at, memories });
     const saved = await one('INSERT INTO stories (event_id, title, subtitle, sections) VALUES ($1,$2,$3,$4) RETURNING *', [eventId, story.title, story.subtitle, JSON.stringify(story.sections)]);
     await query('DELETE FROM stories WHERE event_id=$1 AND id<>$2', [eventId, saved.id]);
@@ -71,9 +81,9 @@ export function createRouter(io) {
     const decide = moderate && m.event_settings.aiModeration !== false;
     const status = decide ? { approve: 'approved', reject: 'rejected', review: 'pending' }[ai.verdict] : m.status;
     const updated = await one(
-      `UPDATE memories SET status=$9, ai_note=$10, ai_status='done', ai_title=$2, ai_caption=$3, ai_story=$4, ai_timeline=$5, ai_theme=$6, ai_section=$7, ai_tags=$8, ai_score=$11
+      `UPDATE memories SET status=$9, ai_note=$10, ai_status='done', ai_title=$2, ai_caption=$3, ai_story=$4, ai_timeline=$5, ai_theme=$6, ai_section=$7, ai_tags=$8, ai_score=$11, ai_phase=$12, ai_daypart=$13
        WHERE id=$1 RETURNING *`,
-      [memoryId, ai.title, ai.caption, ai.story, ai.timeline, ai.theme, ai.section, ai.tags, status, decide ? ai.note : m.ai_note, ai.score ?? 5]
+      [memoryId, ai.title, ai.caption, ai.story, ai.timeline, ai.theme, ai.section, ai.tags, status, decide ? ai.note : m.ai_note, ai.score ?? 5, ai.phase || null, ai.daypart || null]
     );
     if (updated) broadcast(updated);
   }
@@ -127,7 +137,7 @@ export function createRouter(io) {
       if (photo && !photos) return res.status(400).json({ error: 'Photos are turned off for this event.' });
       if (video && !videos) return res.status(400).json({ error: 'Videos are turned off for this event.' });
       if (photo && !photo.mimetype.startsWith('image/')) return res.status(400).json({ error: 'The photo must be an image file.' });
-      if (video && !video.mimetype.startsWith('video/')) return res.status(400).json({ error: 'The video must be a video file.' });
+      if (video && !video.mimetype.startsWith('video/') && !/\.(mp4|mov|m4v|webm|mkv|avi|3gp|mpe?g|wmv|flv|ogv)$/i.test(video.originalname || '')) return res.status(400).json({ error: 'The video must be a video file.' });
 
       const [photoUrl, videoUrl] = await Promise.all([
         photo ? saveFile(photo, `${event.slug}/photos`) : null,
@@ -140,9 +150,9 @@ export function createRouter(io) {
 
       // Always start hidden; the AI check below decides what happens next.
       const row = await one(
-        `INSERT INTO memories (event_id, author_name, category, text, photo_url, video_url, status, ai_status, taken_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'pending','processing',$7) RETURNING *`,
-        [event.id, str(req.body.name, 60), str(req.body.category, 40), text, photoUrl, videoUrl, takenAt]
+        `INSERT INTO memories (event_id, author_name, category, text, photo_url, video_url, status, ai_status, taken_at, taken_src)
+         VALUES ($1,$2,$3,$4,$5,$6,'pending','processing',$7,$8) RETURNING *`,
+        [event.id, str(req.body.name, 60), str(req.body.category, 40), text, photoUrl, videoUrl, takenAt, takenAt ? (req.body.takenSrc === 'exif' ? 'exif' : 'file') : null]
       );
       res.status(201).json({ id: row.id });
 
@@ -173,6 +183,19 @@ export function createRouter(io) {
     if (['gallery', 'story'].includes(req.body.displayMode)) next.displayMode = req.body.displayMode;
     const updated = await one('UPDATE events SET settings=$2 WHERE id=$1 RETURNING *', [e.id, next]);
     io.to(`event:${e.id}`).emit('settings:update', updated.settings);
+    res.json(serializeEvent(updated));
+  }));
+
+  // Names shown to guests: the event name, the heading on the wall, and the line under it.
+  admin.put('/events/:id/details', wrap(async (req, res) => {
+    const e = await findEvent(req.params.id);
+    if (!e) return res.status(404).json({ error: 'Event not found' });
+    const name = str(req.body.name, 80) || e.name;
+    const next = { ...e.settings };
+    if (typeof req.body.wallTitle === 'string') next.wallTitle = str(req.body.wallTitle, 80) || '';
+    if (typeof req.body.tagline === 'string') next.tagline = str(req.body.tagline, 100) || '';
+    const updated = await one('UPDATE events SET name=$2, settings=$3 WHERE id=$1 RETURNING *', [e.id, name, next]);
+    io.to(`event:${e.id}`).emit('event:update', serializeEvent(updated));
     res.json(serializeEvent(updated));
   }));
 
@@ -268,6 +291,16 @@ export function createRouter(io) {
     }
     emit();
   }
+
+  // Rates are USD per 1 million tokens; set GEMINI_PRICE_IN / GEMINI_PRICE_OUT in .env to see a cost estimate.
+  admin.get('/usage', wrap(async (req, res) => {
+    const t = await one('SELECT COUNT(*)::int AS calls, COALESCE(SUM(input_tokens),0)::int AS input, COALESCE(SUM(output_tokens),0)::int AS output FROM ai_usage');
+    const day = await one("SELECT COUNT(*)::int AS calls, COALESCE(SUM(input_tokens),0)::int AS input, COALESCE(SUM(output_tokens),0)::int AS output FROM ai_usage WHERE created_at > now() - interval '24 hours'");
+    const pin = Number(process.env.GEMINI_PRICE_IN), pout = Number(process.env.GEMINI_PRICE_OUT);
+    const priced = Number.isFinite(pin) && Number.isFinite(pout) && process.env.GEMINI_PRICE_IN !== undefined && process.env.GEMINI_PRICE_IN !== '';
+    const cost = (x) => (priced ? (x.input * pin + x.output * pout) / 1e6 : null);
+    res.json({ model: process.env.GEMINI_MODEL || 'gemini-3.8-flash', total: { ...t, cost: cost(t) }, last24h: { ...day, cost: cost(day) }, priced });
+  }));
 
   admin.get('/events/:id/film', wrap(async (req, res) => res.json(await filmStatus(Number(req.params.id)))));
 

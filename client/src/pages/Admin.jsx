@@ -75,6 +75,29 @@ function Row({ m, onAction }) {
   );
 }
 
+function Names({ event, onSave }) {
+  const s = event.settings || {};
+  const [form, setForm] = useState({ name: event.name, wallTitle: s.wallTitle || '', tagline: s.tagline ?? 'Share · Explore · Relive' });
+  const [state, setState] = useState('');
+  useEffect(() => {
+    setForm({ name: event.name, wallTitle: s.wallTitle || '', tagline: s.tagline ?? 'Share · Explore · Relive' });
+  }, [event.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (k) => (e) => { setForm((f) => ({ ...f, [k]: e.target.value })); setState(''); };
+  async function save(e) {
+    e.preventDefault();
+    setState('saving');
+    setState((await onSave(form)) ? 'saved' : '');
+  }
+  return (
+    <form onSubmit={save} className="names">
+      <label className="field"><span>Event name</span><input className="input" value={form.name} maxLength={80} onChange={set('name')} required /></label>
+      <label className="field"><span>Wall title</span><input className="input" value={form.wallTitle} maxLength={80} onChange={set('wallTitle')} placeholder={form.name} /></label>
+      <label className="field"><span>Line under the title</span><input className="input" value={form.tagline} maxLength={100} onChange={set('tagline')} placeholder="Leave empty to hide" /></label>
+      <button className="btn primary" disabled={state === 'saving'}>{state === 'saved' ? 'Saved ✓' : 'Save names'}</button>
+    </form>
+  );
+}
+
 export default function Admin() {
   const [authed, setAuthed] = useState(Boolean(getToken()));
   const [events, setEvents] = useState([]);
@@ -146,6 +169,14 @@ export default function Admin() {
     } catch (e) { guard(e); }
   }
 
+  async function saveNames(form) {
+    try {
+      const updated = await api.updateDetails(eventId, form);
+      setEvents((l) => l.map((e) => (e.id === updated.id ? updated : e)));
+      return true;
+    } catch (e) { guard(e); return false; }
+  }
+
   async function generate() {
     setBusy('story'); setNotice('');
     try {
@@ -212,6 +243,12 @@ export default function Admin() {
           </section>
 
           <aside className="side">
+            <section className="panel">
+              <h2>Names</h2>
+              <p className="hint">The event name appears on the upload page. The wall title and the line under it appear on the display.</p>
+              <Names event={event} onSave={saveNames} />
+            </section>
+
             <section className="panel">
               <h2>What the display shows</h2>
               <div className="seg" role="radiogroup" aria-label="Display view">

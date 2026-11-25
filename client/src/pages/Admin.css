@@ -74,3 +74,19 @@ kbd { background: var(--beige); border-radius: 6px; padding: 1px 6px; font-size:
 .seg button { display: grid; gap: 2px; text-align: left; padding: 12px 14px; border-radius: 16px; border: 1.5px solid var(--line); background: var(--bg); transition: all 0.2s; }
 .seg button small { color: var(--muted); font-size: 12px; }
 .seg button.on { border-color: var(--accent); background: var(--lavender); color: var(--accent-ink); }
+
+.names { display: grid; gap: 12px; }
+.names .field { display: grid; gap: 6px; }
+.names .field span { font-size: 13px; color: var(--muted); }
+
+.usage { display: grid; gap: 12px; }
+.usage > div { display: grid; gap: 2px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.6); }
+.usage span { font-size: 14px; }
+.usage small { color: var(--muted); }
+.usage b { font-size: 20px; }
+
+.usage { display: grid; gap: 12px; }
+.usage > div { display: grid; gap: 2px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.6); }
+.usage span { font-size: 14px; }
+.usage small { color: var(--muted); }
+.usage b { font-size: 20px; }
